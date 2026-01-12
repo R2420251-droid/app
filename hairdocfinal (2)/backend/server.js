@@ -5,6 +5,7 @@ const rateLimit = require('express-rate-limit');
 const path = require('path');
 const fs = require('fs');
 const nodemailer = require('nodemailer');
+const compression = require('compression'); // add compression
 require('dotenv').config();
 
 // Validate environment variables on startup
@@ -24,53 +25,51 @@ const { errorHandler, notFound } = require('./middleware/errorHandler');
 
 const app = express();
 
-// Trust proxy (needed for rate limiting behind reverse proxy)
+// Trust proxy
 app.set('trust proxy', 1);
 
-// Security middleware - Helmet for security headers
+// Security middleware
 app.use(helmet({
   contentSecurityPolicy: {
     directives: {
       defaultSrc: ["'self'"],
       styleSrc: ["'self'", "'unsafe-inline'"],
       scriptSrc: ["'self'"],
-      imgSrc: ["'self'", "data:", "https:", "http:"],
+      imgSrc: ["'self'", "data:", "https:"],
       connectSrc: ["'self'"],
     },
   },
-  crossOriginEmbedderPolicy: false // Allow embedding if needed
+  crossOriginEmbedderPolicy: false
 }));
+
+// Compression for responses (gzip)
+app.use(compression());
 
 // Rate limiting
 const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 100, // Limit each IP to 100 requests per windowMs
+  windowMs: 15 * 60 * 1000,
+  max: 100,
   message: 'Too many requests from this IP, please try again later.',
   standardHeaders: true,
   legacyHeaders: false,
 });
 
 const authLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 5, // Limit each IP to 5 login attempts per windowMs
+  windowMs: 15 * 60 * 1000,
+  max: 5,
   message: 'Too many authentication attempts from this IP, please try again later.',
   skipSuccessfulRequests: true,
 });
 
 app.use('/api/', limiter);
 
-// Middleware
-// Restrict CORS to the production domain and localhost for testing.
-// This keeps the app secure in production while allowing local dev calls.
-const allowedOrigins = [
-  'https://hairdoc.co.za',
-  'https://www.hairdoc.co.za',
-  'http://localhost:5173',
-  'http://localhost:3000'
-];
+// CORS - make origins configurable via env
+const allowedOrigins = (process.env.ALLOWED_ORIGINS || 'https://hairdoc.co.za,https://www.hairdoc.co.za,http://localhost:5173,http://localhost:3000')
+  .split(',')
+  .map(s => s.trim());
+
 app.use(cors({
   origin: (origin, callback) => {
-    // Allow non-browser requests (like curl, server-to-server) with no origin
     if (!origin) return callback(null, true);
     if (allowedOrigins.indexOf(origin) !== -1) return callback(null, true);
     return callback(new Error('CORS policy: Origin not allowed'));
@@ -78,12 +77,11 @@ app.use(cors({
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   credentials: true
 }));
-app.use(express.json({ limit: '50mb' })); // Increased limit for base64 images
+
+app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
-// Email transporter setup
-// Use real SMTP transport when EMAIL_USER/PASS are provided, otherwise
-// fall back to a harmless JSON transport so the app doesn't crash.
+// Email transporter
 let transporter;
 try {
   if (process.env.EMAIL_USER && process.env.EMAIL_PASS) {
@@ -95,23 +93,19 @@ try {
       }
     });
   } else {
-    // JSON transport is safe for environments without SMTP configured
     transporter = nodemailer.createTransport({ jsonTransport: true });
   }
 } catch (err) {
-  // If transporter creation fails, fallback to JSON transport
   transporter = nodemailer.createTransport({ jsonTransport: true });
 }
 
 // Static folder for uploaded images (if using file system)
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
-
-// Ensure uploads directory exists
 if (!fs.existsSync(path.join(__dirname, 'uploads'))) {
   fs.mkdirSync(path.join(__dirname, 'uploads'));
 }
 
-// Health check endpoint (before rate limiting)
+// Health check endpoint
 app.get('/api/health', (req, res) => {
   const db = require('./db');
   // Test database connection
@@ -148,29 +142,6 @@ app.use('/api/settings', require('./routes/settings'));
 app.use('/api/sync', require('./routes/sync'));
 app.use('/api/upload', require('./routes/upload'));
 
-// --- Production Frontend Serving ---
-// Serve the static files from the React app
-const frontendDistPath = path.join(__dirname, '../dist');
-app.use(express.static(frontendDistPath));
-
-// Handles any requests that don't match the ones above
-app.get('*', (req, res) => {
-  const indexPath = path.join(frontendDistPath, 'index.html');
-  if (fs.existsSync(indexPath)) {
-    res.sendFile(indexPath);
-  } else {
-    // If index.html doesn't exist, it likely means the frontend hasn't been built.
-    // Provide a helpful message for the developer.
-    if (req.path.startsWith('/api/')) {
-        // This case should ideally not be hit if API routes are defined before this middleware
-        res.status(404).send('API endpoint not found.');
-    } else {
-        res.status(404).send('Frontend not built. Please run the frontend build process.');
-    }
-  }
-});
-// ------------------------------------
-
 // Base Route
 app.get('/', (req, res) => {
   res.json({
@@ -179,20 +150,37 @@ app.get('/', (req, res) => {
     endpoints: {
       health: '/api/health',
       auth: '/api/auth',
-      services: '/api/services',
-      products: '/api/products',
-      courses: '/api/courses',
-      bookings: '/api/bookings',
-      enrollments: '/api/enrollments',
-      gallery: '/api/gallery',
-      orders: '/api/orders',
-      settings: '/api/settings'
+      services: '/api/services'
     }
   });
 });
 
-// 404 handler for API routes (before catch-all frontend route)
+// 404 handler for API routes (before static SPA fallback)
 app.use('/api/*', notFound);
+
+// --- Production Frontend Serving ---
+// Prefer explicit env var FRONTEND_DIST; fall back to ../frontend/dist
+const frontendDistPath = process.env.FRONTEND_DIST || path.join(__dirname, '../frontend/dist');
+if (fs.existsSync(frontendDistPath)) {
+  app.use(express.static(frontendDistPath));
+
+  // Handles any non-API requests that don't match above routes by returning the SPA index
+  app.get('*', (req, res) => {
+    const indexPath = path.join(frontendDistPath, 'index.html');
+    if (fs.existsSync(indexPath)) return res.sendFile(indexPath);
+    return res.status(404).send('Frontend not built.');
+  });
+} else {
+  // If there is no built frontend available, keep API behavior but make SPA message helpful
+  app.get('*', (req, res) => {
+    if (req.path.startsWith('/api/')) {
+      res.status(404).send('API endpoint not found.');
+    } else {
+      res.status(404).send('Frontend not built. Please run the frontend build process.');
+    }
+  });
+}
+// ------------------------------------
 
 // Error handler middleware (must be last)
 app.use(errorHandler);
@@ -203,10 +191,40 @@ module.exports = app;
 // Only start server if not in test environment
 if (process.env.NODE_ENV !== 'test') {
   const PORT = process.env.PORT || 3002;
-  // Bind to 0.0.0.0 so Host Africa or other hosts can reach the service.
-  app.listen(PORT, '0.0.0.0', () => {
+  // Bind to 0.0.0.0 so hosts can reach the service.
+  const server = app.listen(PORT, '0.0.0.0', () => {
     logger.info(`✅ Server running on port ${PORT}`);
     logger.info(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
     logger.info(`📊 Health check available at: http://0.0.0.0:${PORT}/api/health`);
   });
+
+  // Graceful shutdown
+  const shutdown = async (signal) => {
+    logger.info(`Received ${signal}. Shutting down gracefully...`);
+    server.close(async (err) => {
+      if (err) {
+        logger.error('Error closing HTTP server', err);
+        process.exit(1);
+      }
+      try {
+        const db = require('./db');
+        if (db && typeof db.end === 'function') {
+          await db.end();
+          logger.info('Database pool closed.');
+        }
+      } catch (e) {
+        logger.error('Error during DB pool close', e);
+      }
+      logger.info('Shutdown complete.');
+      process.exit(0);
+    });
+    // Force exit if not closed within X ms
+    setTimeout(() => {
+      logger.error('Could not close connections in time, forcefully shutting down');
+      process.exit(1);
+    }, 30000).unref();
+  };
+
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT', () => shutdown('SIGINT'));
 }
