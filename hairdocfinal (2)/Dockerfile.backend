@@ -1,1 +1,14 @@
+# Backend Dockerfile
+FROM node:18-alpine AS builder
+WORKDIR /app
+# install only production deps
+COPY "hairdocfinal (2)/backend/package*.json" ./backend/
+WORKDIR /app/backend
+RUN npm ci --only=production
 
+# Copy source
+COPY "hairdocfinal (2)/backend" ./
+
+ENV NODE_ENV=production
+EXPOSE 3002
+CMD ["node", "server.js"]
