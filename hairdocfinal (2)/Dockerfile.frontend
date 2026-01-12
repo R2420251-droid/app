@@ -1,0 +1,14 @@
+# Frontend multi-stage build
+FROM node:18-alpine AS build
+WORKDIR /app
+COPY "hairdocfinal (2)/frontend/package*.json" ./frontend/
+WORKDIR /app/frontend
+RUN npm ci
+COPY "hairdocfinal (2)/frontend" ./
+RUN npm run build
+
+FROM nginx:stable-alpine AS web
+COPY --from=build /app/frontend/dist /usr/share/nginx/html
+# Optional: add custom nginx.conf with SPA fallback if needed
+EXPOSE 80
+CMD ["nginx", "-g", "daemon off;"]
