@@ -7,7 +7,7 @@ RUN npm ci
 COPY "hairdocfinal (2)/frontend" ./
 RUN npm run build
 
-FROM nginx:stable-alpine AS web
+FROM nginx:1.29.4-alpine3.23 AS web
 COPY --from=build /app/frontend/dist /usr/share/nginx/html
 # Optional: add custom nginx.conf with SPA fallback if needed
 EXPOSE 80
